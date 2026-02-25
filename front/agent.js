@@ -48,6 +48,7 @@ function startAgent() {
     };
 
     const stopRtc = () => {
+        console.log("[rtc] stop");
         try { rtc?.close?.(); } catch {}
         rtc = null;
         rtcTargetId = null;
@@ -55,6 +56,7 @@ function startAgent() {
     };
 
     const stopCapture = async () => {
+        console.log("[capture] stop");
         try {
             if (capture) {
                 await capture.stop();
@@ -65,10 +67,11 @@ function startAgent() {
 
     const startCapture = async () => {
         if (capture?.isRecording?.()) return;
+        console.log("[capture] start");
 
         capture = new Vp8Capture({
-            onStatus: () => {},
-            onError: () => {},
+            onStatus: (s) => console.log("[capture] status", s),
+            onError: (e) => console.error("[capture] error", e),
         });
 
         await capture.start({
@@ -79,6 +82,7 @@ function startAgent() {
                         sentChunks += 1;
                         sentBytes += blob?.size || 0;
                     } catch {}
+                    console.log("[rtc] send binary", { size: blob?.size || 0, chunks: sentChunks, bytes: sentBytes });
                     await rtc.sendBinary(blob);
                 } catch {}
             },
@@ -88,6 +92,7 @@ function startAgent() {
     const connectToEmbed = async (targetId) => {
         if (targetId == null) return;
         if (rtcTargetId === targetId && rtcOpen) return;
+        console.log("[rtc] connecting to embed", targetId);
 
         stopRtc();
         rtcTargetId = targetId;
@@ -95,12 +100,15 @@ function startAgent() {
 
         const channel = new WrtcBinaryChannel({
             sendSignal: (signal) => {
+                console.log("[rtc] sendSignal", signal?.type || "", signal);
                 ws.sendJsonTo(targetId, "rtc", signal);
             },
             onSignal: (handler) => {
+                console.log("[rtc] onSignal subscribed to", targetId);
                 return ws.onJson((msg) => {
                     if (msg?.action !== "rtc") return;
                     if (msg?.from !== targetId) return;
+                    console.log("[rtc] deliver signal from", targetId, msg?.data?.type || "");
                     handler(msg.data);
                 });
             },
@@ -111,7 +119,9 @@ function startAgent() {
         try {
             await channel.start(true);
             setRtcOpen(true);
-        } catch {
+            console.log("[rtc] open to", targetId);
+        } catch (e) {
+            console.warn("[rtc] start failed to", targetId, e);
             stopRtc();
         }
     };

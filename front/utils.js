@@ -1,85 +1,111 @@
-
 export class Vp8Capture {
   constructor({
-    chunkMs = 1000,
     videoBitsPerSecond = 2_500_000,
-    includeAudio = true,
+    includeAudio = false,          // raw VP8 video only in this minimal version
     frameRate = 30,
-    onStatus = () => {}, // (status, extra?)
-    onError = () => {},  // (error)
+    keyFrameIntervalMs = 2000,     // force a keyframe every N ms
+    onStatus = () => {},
+    onError = () => {},
   } = {}) {
-    this.chunkMs = chunkMs;
     this.videoBitsPerSecond = videoBitsPerSecond;
     this.includeAudio = includeAudio;
     this.frameRate = frameRate;
+    this.keyFrameIntervalMs = keyFrameIntervalMs;
     this.onStatus = onStatus;
     this.onError = onError;
 
-    this.mimeType = "video/webm;codecs=vp8,opus";
     this.stream = null;
-    this.recorder = null;
+    this.encoder = null;
+    this._reader = null;
+    this._running = false;
     this._onChunk = null;
-    this._stopping = false;
+
+    this._lastKeyTs = 0;
   }
 
   async start({ onChunk } = {}) {
     try {
-      this._stopping = false;
       this._onChunk = typeof onChunk === "function" ? onChunk : null;
+      this._running = true;
 
       if (!navigator.mediaDevices?.getDisplayMedia) {
-        throw new Error("getDisplayMedia() n'est pas supporté sur ce navigateur.");
+        throw new Error("getDisplayMedia() n'est pas supporté.");
       }
-      if (!window.MediaRecorder) {
-        throw new Error("MediaRecorder n'est pas supporté sur ce navigateur.");
+      if (!window.VideoEncoder) {
+        throw new Error("WebCodecs VideoEncoder n'est pas supporté.");
       }
-      if (!MediaRecorder.isTypeSupported(this.mimeType)) {
-        throw new Error(`Type MediaRecorder non supporté: ${this.mimeType}`);
+      if (!window.MediaStreamTrackProcessor) {
+        throw new Error("MediaStreamTrackProcessor n'est pas supporté (nécessaire pour frames brutes).");
       }
 
       this.onStatus("requesting_capture");
 
       this.stream = await navigator.mediaDevices.getDisplayMedia({
         video: { frameRate: this.frameRate },
-        audio: this.includeAudio,
+        // Audio: si tu veux aussi raw audio, c’est un autre pipeline (AudioEncoder).
+        audio: false,
       });
 
-      // Si l’utilisateur stoppe le partage via l’UI du navigateur
       const [videoTrack] = this.stream.getVideoTracks();
-      videoTrack?.addEventListener("ended", () => {
-        if (!this._stopping) this.stop().catch(() => {});
+      if (!videoTrack) throw new Error("Pas de piste vidéo.");
+
+      videoTrack.addEventListener("ended", () => {
+        if (this._running) this.stop().catch(() => {});
       });
 
-      this.onStatus("starting_recorder", { mimeType: this.mimeType });
+      const settings = videoTrack.getSettings?.() || {};
+      const width = settings.width || 1280;
+      const height = settings.height || 720;
 
-      this.recorder = new MediaRecorder(this.stream, {
-        mimeType: this.mimeType,
-        videoBitsPerSecond: this.videoBitsPerSecond,
+      this.onStatus("starting_encoder", { codec: "vp8", width, height, bitrate: this.videoBitsPerSecond });
+
+      // 1) Processor: transforme track -> VideoFrame stream
+      const processor = new MediaStreamTrackProcessor({ track: videoTrack });
+      this._reader = processor.readable.getReader();
+
+      // 2) Encoder: sort des EncodedVideoChunk VP8 "raw"
+      const encoder = new VideoEncoder({
+        output: async (chunk /* EncodedVideoChunk */) => {
+          try {
+            if (!this._onChunk) return;
+
+            const data = new Uint8Array(chunk.byteLength);
+            chunk.copyTo(data);
+
+            // IMPORTANT: on envoie type + timestamp + data
+            this._onChunk(
+              { type: chunk.type, timestamp: chunk.timestamp, data }, // raw VP8 frame
+              { codec: "vp8", bytes: data.byteLength, ts: Date.now() }
+            );
+          } catch (err) {
+            this.onError(err);
+          }
+        },
+        error: (e) => {
+          this.onError(e instanceof Error ? e : new Error(String(e)));
+        },
       });
 
-      this.recorder.ondataavailable = (e) => {
-        if (!e.data || e.data.size === 0) return;
+      // Configure VP8 encoder
+      encoder.configure({
+        codec: "vp8",
+        width,
+        height,
+        bitrate: this.videoBitsPerSecond,
+        framerate: this.frameRate,
+        latencyMode: "realtime",
+      });
 
-        try {
-          this._onChunk?.(e.data, {
-            mimeType: this.mimeType,
-            bytes: e.data.size,
-            ts: Date.now(),
-          });
-        } catch (err) {
-          this.onError(err);
-        }
-      };
+      this.encoder = encoder;
+      this._lastKeyTs = 0;
 
-      this.recorder.onerror = (ev) => {
-        this.onError(ev?.error || new Error("Erreur MediaRecorder"));
-      };
+      this.onStatus("encoding");
 
-      this.recorder.onstart = () => this.onStatus("recording");
-      this.recorder.onstop = () => this.onStatus("stopped");
-
-      // Un chunk toutes les chunkMs millisecondes
-      this.recorder.start(this.chunkMs);
+      // 3) Loop: read VideoFrame -> encode -> close frame
+      this._encodeLoop().catch((err) => {
+        this.onError(err);
+        this.stop().catch(() => {});
+      });
     } catch (err) {
       this.onError(err);
       await this._cleanup().catch(() => {});
@@ -87,37 +113,64 @@ export class Vp8Capture {
     }
   }
 
-  async stop() {
-    this._stopping = true;
+  async _encodeLoop() {
+    while (this._running && this._reader && this.encoder) {
+      const { value: frame, done } = await this._reader.read();
+      if (done || !frame) break;
 
-    try {
-      this.onStatus("stopping");
+      try {
+        const nowMs = performance.now();
+        const forceKey = (this._lastKeyTs === 0) || (nowMs - this._lastKeyTs >= this.keyFrameIntervalMs);
 
-      // Arrête l’enregistreur
-      if (this.recorder && this.recorder.state !== "inactive") {
-        this.recorder.stop();
+        this.encoder.encode(frame, { keyFrame: forceKey });
+
+        if (forceKey) this._lastKeyTs = nowMs;
+      } finally {
+        // Toujours fermer le frame pour éviter memory leak
+        frame.close();
       }
 
-      // Arrête la capture (tracks)
+      // Backpressure: évite d’accumuler trop de frames encodées en attente
+      if (this.encoder.encodeQueueSize > 8) {
+        await this.encoder.flush().catch(() => {});
+      }
+    }
+  }
+
+  async stop() {
+    this._running = false;
+    this.onStatus("stopping");
+
+    try {
+      // stop tracks
       if (this.stream) {
         this.stream.getTracks().forEach((t) => {
           try { t.stop(); } catch {}
         });
       }
+
+      // stop reader
+      try { await this._reader?.cancel(); } catch {}
+
+      // flush + close encoder
+      try { await this.encoder?.flush(); } catch {}
+      try { this.encoder?.close(); } catch {}
     } finally {
       await this._cleanup();
-      this._stopping = false;
+      this.onStatus("stopped");
     }
   }
 
   isRecording() {
-    return !!this.recorder && this.recorder.state === "recording";
+    return this._running;
   }
 
   async _cleanup() {
-    this.recorder = null;
+    this._reader = null;
+    this.encoder = null;
     this.stream = null;
     this._onChunk = null;
+    this._lastKeyTs = 0;
   }
 }
 

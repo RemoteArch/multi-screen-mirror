@@ -6,17 +6,10 @@
     <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body>
-    <web-app url="./components/streams.jsx"></web-app>
-    <script>
-        (function () {
-            const el = document.querySelector('web-app');
-            if (!el) return;
-            const isAdmin = location.hash === '#admin';
-            el.setAttribute('url', isAdmin ? './components/admin.jsx' : './components/streams.jsx');
-        })();
-    </script>
+    <web-app url="./components/admin.jsx"></web-app>
     <web-app url="./components/emdeb.jsx"></web-app>
     <script type="module" src="https://cdn.jsdelivr.net/gh/remotearch/react-udm-template/web-app.js"></script>
+    <!-- <script type="module" src="./embed.js"></script> -->
     <script type="module" src="./agent.js"></script>
 </body>
 </html>

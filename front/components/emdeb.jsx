@@ -18,10 +18,8 @@ export default function Emdeb() {
     const rtcSignalHandlerRef = useRef(null);
 
     const videoRef = useRef(null);
-    const mediaSourceRef = useRef(null);
-    const sourceBufferRef = useRef(null);
-    const appendQueueRef = useRef([]);
-    const drawRafRef = useRef(null);
+    const decoderRef = useRef(null);
+    const frameCountRef = useRef(0);
 
     const drawPlaceholder = () => {
         const canvas = canvasRef.current;
@@ -29,6 +27,7 @@ export default function Emdeb() {
 
         const ctx = canvas.getContext("2d");
         if (!ctx) return;
+        console.log("[embed] draw placeholder");
 
         const w = canvas.width;
         const h = canvas.height;
@@ -38,7 +37,7 @@ export default function Emdeb() {
 
         ctx.fillStyle = "#94a3b8";
         ctx.font = "14px sans-serif";
-        ctx.fillText("EMDEB", 12, 24);
+        ctx.fillText("EMDEB (WebCodecs)", 12, 24);
     };
 
     const resizeCanvasToDisplaySize = () => {
@@ -51,6 +50,7 @@ export default function Emdeb() {
         const nextH = Math.max(1, Math.floor(rect.height * dpr));
 
         if (canvas.width !== nextW || canvas.height !== nextH) {
+            console.log("[embed] resize", { nextW, nextH, dpr });
             canvas.width = nextW;
             canvas.height = nextH;
             drawPlaceholder();
@@ -58,9 +58,6 @@ export default function Emdeb() {
     };
 
     const infosPayload = () => {
-        const video = videoRef.current;
-        const ms = mediaSourceRef.current;
-        const sb = sourceBufferRef.current;
         return {
             role: "emdeb",
             ts: Date.now(),
@@ -72,16 +69,8 @@ export default function Emdeb() {
             stream: {
                 recvChunks: recvChunksRef.current,
                 recvBytes: recvBytesRef.current,
-                queue: appendQueueRef.current.length,
-                mse: {
-                    readyState: ms?.readyState ?? null,
-                    sourceBuffer: !!sb,
-                    updating: !!sb?.updating,
-                },
-                video: {
-                    readyState: video?.readyState ?? null,
-                    paused: video?.paused ?? null,
-                },
+                decodedFrames: frameCountRef.current,
+                mode: "WebCodecs",
             },
         };
     };
@@ -98,96 +87,89 @@ export default function Emdeb() {
         } catch {}
     };
 
-    const sendInfosHeartbeat = () => {
-        const adminId = lastAdminIdRef.current;
-        if (adminId != null) return sendInfosTo(adminId);
-        return sendInfosBroadcast();
-    };
-
     const stopRtc = () => {
+        console.log("[rtc] stop");
         try { rtcRef.current?.close?.(); } catch {}
         rtcRef.current = null;
         rtcPeerIdRef.current = null;
         rtcOpenRef.current = false;
+        
+        if (decoderRef.current) {
+            try { decoderRef.current.close(); } catch {}
+            decoderRef.current = null;
+        }
+        
         sendInfosBroadcast();
     };
 
-    const ensureMediaPipeline = () => {
-        if (videoRef.current && mediaSourceRef.current) return;
+    const ensureDecoder = () => {
+        if (decoderRef.current) return;
 
-        const video = document.createElement("video");
-        video.muted = true;
-        video.playsInline = true;
-        video.autoplay = true;
-        videoRef.current = video;
-
-        const ms = new MediaSource();
-        mediaSourceRef.current = ms;
-
-        const url = URL.createObjectURL(ms);
-        video.src = url;
-
-        ms.addEventListener("sourceopen", () => {
-            try {
-                const mime = 'video/webm;codecs="vp8,opus"';
-                const sb = ms.addSourceBuffer(mime);
-                sb.mode = "sequence";
-                sourceBufferRef.current = sb;
-
-                // Flush queued chunks as soon as SourceBuffer exists
-                const q0 = appendQueueRef.current;
-                if (!sb.updating && q0.length > 0) {
-                    try { sb.appendBuffer(q0.shift()); } catch {}
+        console.log("[decoder] initializing WebCodecs VideoDecoder");
+        
+        const decoder = new VideoDecoder({
+            output: (frame) => {
+                const canvas = canvasRef.current;
+                if (!canvas) {
+                    frame.close();
+                    return;
                 }
-
-                sb.addEventListener("updateend", () => {
-                    const q = appendQueueRef.current;
-                    if (!sb.updating && q.length > 0) {
-                        try { sb.appendBuffer(q.shift()); } catch {}
-                    }
-                });
-            } catch {
-                // ignore
+                const ctx = canvas.getContext("2d");
+                if (!ctx) {
+                    frame.close();
+                    return;
+                }
+                
+                ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+                frameCountRef.current++;
+                frame.close();
+            },
+            error: (e) => {
+                console.error("[decoder] fatal error", e);
+                decoderRef.current = null;
             }
         });
+
+        decoder.configure({
+            codec: 'vp8',
+            optimizeForLatency: true
+        });
+
+        decoderRef.current = decoder;
     };
 
-    const enqueueChunk = (ab) => {
-        const sb = sourceBufferRef.current;
-        if (!sb) {
-            appendQueueRef.current.push(ab);
-            return;
-        }
+    const decodeChunk = (ab) => {
+        ensureDecoder();
+        const decoder = decoderRef.current;
+        if (!decoder || decoder.state !== "configured") return;
 
-        if (sb.updating || appendQueueRef.current.length > 0) {
-            appendQueueRef.current.push(ab);
-            return;
+        const view = new Uint8Array(ab);
+        // SKIP WebM Header (EBML) if present (first chunk usually)
+        if (view[0] === 0x1A && view[1] === 0x45 && view[2] === 0xDF && view[3] === 0xA3) {
+            console.log("[decoder] skipping webm header chunk");
+            return; 
         }
 
         try {
-            sb.appendBuffer(ab);
-        } catch {
-            appendQueueRef.current.push(ab);
+            // NOTE: MediaRecorder segments are WebM. 
+            // VideoDecoder needs EncodedVideoChunk (raw bitstream).
+            // This direct approach assumes chunks are either raw or the decoder 
+            // can handle some container overhead (VP8 in WebM clusters).
+            
+            const isFirst = frameCountRef.current === 0;
+            const chunk = new EncodedVideoChunk({
+                type: isFirst ? 'key' : 'delta',
+                timestamp: performance.now() * 1000,
+                data: ab
+            });
+            
+            decoder.decode(chunk);
+        } catch (e) {
+            console.warn("[decoder] decode error", e.message);
+            if (e.message.includes("key frame")) {
+                frameCountRef.current = 0; // Reset to try to sync on next key
+            }
         }
-    };
-
-    const startDrawingToCanvas = () => {
-        if (drawRafRef.current) return;
-        const tick = () => {
-            drawRafRef.current = requestAnimationFrame(tick);
-            const canvas = canvasRef.current;
-            const video = videoRef.current;
-            if (!canvas || !video) return;
-
-            if (video.readyState < 2) return;
-
-            const ctx = canvas.getContext("2d");
-            if (!ctx) return;
-            try {
-                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            } catch {}
-        };
-        drawRafRef.current = requestAnimationFrame(tick);
     };
 
     useEffect(() => {
@@ -199,6 +181,9 @@ export default function Emdeb() {
         const ws = new HubWsClient({
             urlBase: "wss://wshnklvucl.zen-apps.com/ws",
             room: "screen-mirror",
+            onStatus: (s) => {
+                console.log("[ws]", s?.type, s?.detail || "");
+            },
         });
         wsRef.current = ws;
 
@@ -206,6 +191,7 @@ export default function Emdeb() {
             if (msg?.action === "infos_req") {
                 if (msg?.from == null) return;
                 lastAdminIdRef.current = msg.from;
+                console.log("[ws] infos_req from", msg.from);
                 sendInfosTo(msg.from);
                 return;
             }
@@ -214,6 +200,7 @@ export default function Emdeb() {
                 if (msg?.from == null) return;
 
                 const peerId = msg.from;
+                console.log("[ws] rtc signal from", peerId, msg?.data?.type || "");
 
                 // (re)start responder when first rtc arrives or peer changes
                 if (!rtcRef.current || rtcPeerIdRef.current !== peerId) {
@@ -222,9 +209,11 @@ export default function Emdeb() {
 
                     const channel = new WrtcBinaryChannel({
                         sendSignal: (signal) => {
+                            console.log("[rtc] sendSignal", signal?.type || "", signal);
                             ws.sendJsonTo(peerId, "rtc", signal);
                         },
                         onSignal: (handler) => {
+                            console.log("[rtc] onSignal subscribed");
                             rtcSignalHandlerRef.current = handler;
                             return () => {};
                         },
@@ -238,21 +227,23 @@ export default function Emdeb() {
                             recvChunksRef.current += 1;
                             recvBytesRef.current += buf?.byteLength || 0;
                         } catch {}
-                        ensureMediaPipeline();
-                        enqueueChunk(buf);
-                        startDrawingToCanvas();
+                        // console.log("[rtc] binary", { size: buf?.byteLength || 0, chunks: recvChunksRef.current, bytes: recvBytesRef.current });
+                        decodeChunk(buf);
                     });
 
                     channel.start(false).then(() => {
                         rtcOpenRef.current = true;
+                        console.log("[rtc] open");
                         sendInfosBroadcast();
                     }).catch(() => {
+                        console.warn("[rtc] start failed");
                         stopRtc();
                     });
                 }
 
                 // IMPORTANT: deliver the current rtc signal too (first offer often arrives here)
                 try {
+                    console.log("[rtc] deliver signal", msg?.data?.type || "", msg?.data);
                     rtcSignalHandlerRef.current?.(msg.data);
                 } catch {}
 
@@ -265,22 +256,7 @@ export default function Emdeb() {
 
         return () => {
             window.removeEventListener("resize", onResize);
-            if (drawRafRef.current) {
-                cancelAnimationFrame(drawRafRef.current);
-                drawRafRef.current = null;
-            }
             stopRtc();
-
-            try {
-                const video = videoRef.current;
-                if (video) {
-                    try { URL.revokeObjectURL(video.src); } catch {}
-                }
-            } catch {}
-            videoRef.current = null;
-            mediaSourceRef.current = null;
-            sourceBufferRef.current = null;
-            appendQueueRef.current = [];
             try { wsRef.current?.close(); } catch {}
             wsRef.current = null;
         };
