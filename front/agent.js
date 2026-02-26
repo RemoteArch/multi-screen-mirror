@@ -43,6 +43,30 @@ function startAgent() {
         } catch {}
     };
 
+    const describeError = (err) => {
+        if (!err) return { name: "", message: "" };
+        const name = String(err?.name || "Error");
+        const message = String(err?.message || err);
+        const stack = typeof err?.stack === "string" ? err.stack : "";
+        return { name, message, stack };
+    };
+
+    const replyCmd = ({ to, reqType, ok, error, extra } = {}) => {
+        try {
+            if (to == null) return;
+            const e = error ? describeError(error) : null;
+            ws.sendJsonTo(to, "cmd_result", {
+                type: reqType,
+                ok: !!ok,
+                error: e ? e.message : "",
+                errorName: e ? e.name : "",
+                errorStack: e ? e.stack : "",
+                ts: Date.now(),
+                ...extra,
+            });
+        } catch {}
+    };
+
     const setRtcOpen = (open) => {
         rtcOpen = !!open;
     };
@@ -147,20 +171,52 @@ function startAgent() {
 
             const type = msg?.data?.type;
             if (type === "start_capture") {
-                startCapture().catch(() => {});
+                startCapture()
+                    .then(() => {
+                        console.log("[cmd] start_capture ok");
+                        replyCmd({ to: msg.from, reqType: type, ok: true });
+                    })
+                    .catch((e) => {
+                        const d = describeError(e);
+                        console.error("[cmd] start_capture failed", d.name, d.message, d.stack);
+                        replyCmd({ to: msg.from, reqType: type, ok: false, error: e });
+                    });
                 return;
             }
             if (type === "stop_capture") {
-                stopCapture().catch(() => {});
+                stopCapture()
+                    .then(() => {
+                        console.log("[cmd] stop_capture ok");
+                        replyCmd({ to: msg.from, reqType: type, ok: true });
+                    })
+                    .catch((e) => {
+                        const d = describeError(e);
+                        console.error("[cmd] stop_capture failed", d.name, d.message, d.stack);
+                        replyCmd({ to: msg.from, reqType: type, ok: false, error: e });
+                    });
                 return;
             }
             if (type === "connect_embed") {
-                connectToEmbed(msg?.data?.targetId).catch(() => {});
+                connectToEmbed(msg?.data?.targetId)
+                    .then(() => {
+                        console.log("[cmd] connect_embed ok", msg?.data?.targetId);
+                        replyCmd({ to: msg.from, reqType: type, ok: true, extra: { targetId: msg?.data?.targetId } });
+                    })
+                    .catch((e) => {
+                        const d = describeError(e);
+                        console.error("[cmd] connect_embed failed", d.name, d.message, d.stack);
+                        replyCmd({ to: msg.from, reqType: type, ok: false, error: e, extra: { targetId: msg?.data?.targetId } });
+                    });
                 return;
             }
 
             if (type === "disconnect_embed") {
-                stopRtc();
+                try {
+                    stopRtc();
+                    replyCmd({ to: msg.from, reqType: type, ok: true });
+                } catch (e) {
+                    replyCmd({ to: msg.from, reqType: type, ok: false, error: e });
+                }
                 return;
             }
 
