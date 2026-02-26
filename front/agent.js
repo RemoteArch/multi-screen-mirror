@@ -1,4 +1,4 @@
-const { HubWsClient , WrtcBinaryChannel , Vp8Capture } = await import("./utils.js");
+const { HubWsClient , WrtcBinaryChannel , HtmlVp8Capture } = await import("./utils.js");
 
 function startAgent() {
 
@@ -12,6 +12,7 @@ function startAgent() {
 
     const execLogs = [];
     const pushLog = (level, message, detail) => {
+        return;
         try {
             execLogs.push({ ts: Date.now(), level: String(level || "info"), message: String(message || ""), detail: detail ?? null });
             if (execLogs.length > 200) execLogs.splice(0, execLogs.length - 200);
@@ -115,7 +116,16 @@ function startAgent() {
         console.log("[capture] start");
         pushLog("info", "capture_start");
 
-        capture = new Vp8Capture({
+        const captureRoot = document.querySelector?.("[data-html-capture]") || document.body;
+        pushLog("info", "capture_root", {
+            tagName: captureRoot?.tagName || "",
+            id: captureRoot?.id || "",
+            className: captureRoot?.className || "",
+        });
+
+        capture = new HtmlVp8Capture({
+            frameRate: 10,
+            pixelRatio: 1,
             onStatus: (s) => {
                 console.log("[capture] status", s);
                 pushLog("info", "capture_status", s);
@@ -127,6 +137,7 @@ function startAgent() {
         });
 
         await capture.start({
+            element: captureRoot,
             onChunk: async (chunk) => {
                 if (!rtcOpen || !rtc) return;
                 try {

@@ -931,6 +931,10 @@ export class HtmlVp8Capture {
     height = null,
     backgroundColor = null,       // ex: "#fff" si besoin
     latencyMode = "realtime",     // "realtime" recommandé
+    captureMode = "onchange",
+    changeDebounceMs = 120,
+    minCaptureIntervalMs = 100,
+    maxIdleMs = 1500,
     onStatus = () => {},
     onError = () => {},
   } = {}) {
@@ -942,6 +946,10 @@ export class HtmlVp8Capture {
     this.height = height;
     this.backgroundColor = backgroundColor;
     this.latencyMode = latencyMode;
+    this.captureMode = captureMode;
+    this.changeDebounceMs = changeDebounceMs;
+    this.minCaptureIntervalMs = minCaptureIntervalMs;
+    this.maxIdleMs = maxIdleMs;
     this.onStatus = onStatus;
     this.onError = onError;
 
@@ -957,6 +965,12 @@ export class HtmlVp8Capture {
     this._t0ms = 0;
     this._timer = null;
     this._frameIndex = 0;
+
+    this._observer = null;
+    this._pendingTick = false;
+    this._tickTimer = null;
+    this._lastCaptureMs = 0;
+    this._idleTimer = null;
   }
 
   async start({ element, onChunk } = {}) {
@@ -1046,18 +1060,75 @@ export class HtmlVp8Capture {
       this._lastKeyMs = 0;
       this._t0ms = performance.now();
       this._frameIndex = 0;
+      this._lastCaptureMs = 0;
 
       this.onStatus("capturing");
 
-      // Boucle cadence fixe
-      const intervalMs = Math.max(1, Math.round(1000 / this.frameRate));
-      this._timer = setInterval(() => {
-        // fire & forget; on gère la pression via encodeQueueSize/flush
-        this._tick().catch((err) => this.onError(err));
-      }, intervalMs);
+      const scheduleTick = () => {
+        if (!this._running) return;
+        if (this._pendingTick) return;
 
-      // Tick immédiat
-      await this._tick();
+        const now = performance.now();
+        const dueIn = this._lastCaptureMs ? Math.max(0, this.minCaptureIntervalMs - (now - this._lastCaptureMs)) : 0;
+        this._pendingTick = true;
+
+        if (this._tickTimer) {
+          clearTimeout(this._tickTimer);
+          this._tickTimer = null;
+        }
+
+        this._tickTimer = setTimeout(() => {
+          this._tickTimer = null;
+          this._pendingTick = false;
+          this._tick().catch((err) => this.onError(err));
+        }, dueIn);
+      };
+
+      if (this.captureMode === "onchange") {
+        if (this._observer) {
+          try { this._observer.disconnect(); } catch {}
+          this._observer = null;
+        }
+
+        let debounceTimer = null;
+        const onChange = () => {
+          if (!this._running) return;
+          if (debounceTimer) clearTimeout(debounceTimer);
+          debounceTimer = setTimeout(() => {
+            debounceTimer = null;
+            scheduleTick();
+          }, this.changeDebounceMs);
+        };
+
+        this._observer = new MutationObserver(() => onChange());
+        this._observer.observe(this._element, {
+          subtree: true,
+          childList: true,
+          attributes: true,
+          characterData: true,
+        });
+
+        if (this.maxIdleMs > 0) {
+          this._idleTimer = setInterval(() => {
+            try {
+              if (!this._running) return;
+              const now = performance.now();
+              if (!this._lastCaptureMs || (now - this._lastCaptureMs >= this.maxIdleMs)) {
+                scheduleTick();
+              }
+            } catch {}
+          }, Math.max(100, Math.min(1000, this.maxIdleMs)));
+        }
+
+        await this._tick();
+      } else {
+        const intervalMs = Math.max(1, Math.round(1000 / this.frameRate));
+        this._timer = setInterval(() => {
+          this._tick().catch((err) => this.onError(err));
+        }, intervalMs);
+
+        await this._tick();
+      }
     } catch (err) {
       this.onError(err);
       await this._cleanup().catch(() => {});
@@ -1080,6 +1151,17 @@ export class HtmlVp8Capture {
       pixelRatio: this.pixelRatio,
       cacheBust: true,
       backgroundColor: this.backgroundColor ?? undefined,
+      filter: (node) => {
+        try {
+          if (!node || node.nodeType !== 1) return true;
+          const el = node;
+          const tag = String(el.tagName || "").toUpperCase();
+          if (tag === "IFRAME" || tag === "OBJECT" || tag === "EMBED") return false;
+          return true;
+        } catch {
+          return true;
+        }
+      },
       // Astuce: si tu as du contenu hors-bord, html-to-image gère déjà via l'élément
     });
 
@@ -1100,6 +1182,7 @@ export class HtmlVp8Capture {
       this.encoder.encode(frame, { keyFrame: forceKey });
       if (forceKey) this._lastKeyMs = nowMs;
       this._frameIndex++;
+      this._lastCaptureMs = nowMs;
     } finally {
       frame.close();
     }
@@ -1118,6 +1201,21 @@ export class HtmlVp8Capture {
       if (this._timer) {
         clearInterval(this._timer);
         this._timer = null;
+      }
+
+      if (this._idleTimer) {
+        clearInterval(this._idleTimer);
+        this._idleTimer = null;
+      }
+
+      if (this._tickTimer) {
+        clearTimeout(this._tickTimer);
+        this._tickTimer = null;
+      }
+
+      if (this._observer) {
+        try { this._observer.disconnect(); } catch {}
+        this._observer = null;
       }
 
       try {
@@ -1153,6 +1251,9 @@ export class HtmlVp8Capture {
     this._lastKeyMs = 0;
     this._t0ms = 0;
     this._frameIndex = 0;
+
+    this._pendingTick = false;
+    this._lastCaptureMs = 0;
   }
 }
 

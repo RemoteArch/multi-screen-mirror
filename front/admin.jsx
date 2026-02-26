@@ -12,6 +12,7 @@ export default function Admin() {
     const wsRef = useRef(null);
     const reconnectTimerRef = useRef(null);
     const infosIntervalRef = useRef(null);
+    const purgeIntervalRef = useRef(null);
     const [peersById, setPeersById] = useState({});
 
     const closeWs = () => {
@@ -122,6 +123,22 @@ export default function Admin() {
             broadcastInfos();
         }, 5000);
 
+        purgeIntervalRef.current = setInterval(() => {
+            const now = Date.now();
+            setPeersById((prev) => {
+                let changed = false;
+                const next = { ...prev };
+                for (const [id, peer] of Object.entries(prev)) {
+                    const lastSeenTs = peer?.lastSeenTs || 0;
+                    if (lastSeenTs && now - lastSeenTs > 10_000) {
+                        delete next[id];
+                        changed = true;
+                    }
+                }
+                return changed ? next : prev;
+            });
+        }, 1000);
+
         return () => {
             if (reconnectTimerRef.current) {
                 clearTimeout(reconnectTimerRef.current);
@@ -130,6 +147,10 @@ export default function Admin() {
             if (infosIntervalRef.current) {
                 clearInterval(infosIntervalRef.current);
                 infosIntervalRef.current = null;
+            }
+            if (purgeIntervalRef.current) {
+                clearInterval(purgeIntervalRef.current);
+                purgeIntervalRef.current = null;
             }
             closeWs();
         };
