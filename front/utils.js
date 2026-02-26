@@ -281,7 +281,7 @@ export class WrtcBinaryChannel {
   }
 
   /**
-   * Envoie du binaire (ArrayBuffer | Uint8Array | Blob).
+   * Envoie du binaire (ArrayBuffer | Uint8Array).
    * Chunk automatiquement si c'est grand.
    */
   async sendBinary(data) {
@@ -293,10 +293,8 @@ export class WrtcBinaryChannel {
       buffer = data;
     } else if (ArrayBuffer.isView(data)) {
       buffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-    } else if (data instanceof Blob) {
-      buffer = await data.arrayBuffer();
     } else {
-      throw new Error("sendBinary expects ArrayBuffer, TypedArray, or Blob");
+      throw new Error("sendBinary expects ArrayBuffer or TypedArray");
     }
 
     // Petit => on envoie direct
@@ -689,6 +687,90 @@ export class HubWsClient {
   }
 }
 
+export class Vp8Decoder {
+  constructor({ onFrame = () => {}, onStatus = () => {}, onError = () => {}, maxQueueSize = 6 } = {}) {
+    this.onFrame = onFrame;
+    this.onStatus = onStatus;
+    this.onError = onError;
+    this.maxQueueSize = maxQueueSize;
+
+    this.decoder = null;
+    this._running = false;
+    this._lastTs = 0;
+  }
+
+  async start() {
+    if (this._running) return;
+    if (!window.VideoDecoder) throw new Error("WebCodecs VideoDecoder n'est pas supporté.");
+
+    this._running = true;
+    this.onStatus("starting_decoder", { codec: "vp8" });
+
+    const decoder = new VideoDecoder({
+      output: async (frame) => {
+        try {
+          if (!this._running) {
+            try { frame.close(); } catch {}
+            return;
+          }
+
+          const bitmap = await createImageBitmap(frame);
+          try { frame.close(); } catch {}
+
+          this.onFrame(bitmap);
+        } catch (err) {
+          try { frame.close(); } catch {}
+          this.onError(err);
+        }
+      },
+      error: (e) => {
+        this.onError(e instanceof Error ? e : new Error(String(e)));
+      },
+    });
+
+    decoder.configure({ codec: "vp8" });
+    this.decoder = decoder;
+    this.onStatus("decoding");
+  }
+
+  async decode({ type, timestamp, data } = {}) {
+    if (!this._running || !this.decoder) throw new Error("Vp8Decoder not started. Call start().");
+    if (!(data instanceof Uint8Array)) throw new Error("Vp8Decoder expects data as Uint8Array");
+    if (type !== "key" && type !== "delta") throw new Error("Vp8Decoder chunk.type must be 'key' or 'delta'");
+
+    const ts = Number.isFinite(timestamp) ? timestamp : (this._lastTs + 1);
+    this._lastTs = ts;
+
+    try {
+      const chunk = new EncodedVideoChunk({
+        type,
+        timestamp: ts,
+        data,
+      });
+
+      if (this.decoder.decodeQueueSize > this.maxQueueSize) {
+        await this.decoder.flush().catch(() => {});
+      }
+
+      this.decoder.decode(chunk);
+    } catch (err) {
+      this.onError(err);
+    }
+  }
+
+  async flush() {
+    if (!this.decoder) return;
+    await this.decoder.flush();
+  }
+
+  close() {
+    this._running = false;
+    try { this.decoder?.close(); } catch {}
+    this.decoder = null;
+    this.onStatus("stopped");
+  }
+}
+
 export class WebTransportHubClient {
   constructor({ url, onStatus } = {}) {
     this.url = url;
@@ -838,3 +920,5 @@ export class WebTransportHubClient {
     throw new Error("Binary payload must be ArrayBuffer, TypedArray, or Blob");
   }
 }
+
+

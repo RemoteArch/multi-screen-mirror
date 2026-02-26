@@ -1,7 +1,7 @@
 
 
 const { useEffect, useRef } = React;
-const { HubWsClient, WrtcBinaryChannel } = await loadModule("utils.js");
+const { HubWsClient, WrtcBinaryChannel, Vp8Decoder } = await loadModule("utils.js");
 
 export default function Emdeb() {
     const canvasRef = useRef(null);
@@ -105,65 +105,61 @@ export default function Emdeb() {
     const ensureDecoder = () => {
         if (decoderRef.current) return;
 
-        console.log("[decoder] initializing WebCodecs VideoDecoder");
-        
-        const decoder = new VideoDecoder({
-            output: (frame) => {
+        console.log("[decoder] initializing Vp8Decoder");
+
+        const decoder = new Vp8Decoder({
+            onFrame: (bitmap) => {
                 const canvas = canvasRef.current;
                 if (!canvas) {
-                    frame.close();
+                    try { bitmap.close(); } catch {}
                     return;
                 }
                 const ctx = canvas.getContext("2d");
                 if (!ctx) {
-                    frame.close();
+                    try { bitmap.close(); } catch {}
                     return;
                 }
-                
-                ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+
+                try {
+                    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+                } catch {}
                 frameCountRef.current++;
-                frame.close();
+                try { bitmap.close(); } catch {}
             },
-            error: (e) => {
+            onError: (e) => {
                 console.error("[decoder] fatal error", e);
                 decoderRef.current = null;
-            }
-        });
-
-        decoder.configure({
-            codec: 'vp8',
-            optimizeForLatency: true
+            },
         });
 
         decoderRef.current = decoder;
+        decoder.start().catch((e) => {
+            console.error("[decoder] start failed", e);
+            decoderRef.current = null;
+        });
     };
 
     const decodeChunk = (ab) => {
         ensureDecoder();
         const decoder = decoderRef.current;
-        if (!decoder || decoder.state !== "configured") return;
+        if (!decoder) return;
 
-        const view = new Uint8Array(ab);
-        // SKIP WebM Header (EBML) if present (first chunk usually)
-        if (view[0] === 0x1A && view[1] === 0x45 && view[2] === 0xDF && view[3] === 0xA3) {
-            console.log("[decoder] skipping webm header chunk");
-            return; 
-        }
+        if (!ab || ab.byteLength < 1) return;
+        const data = new Uint8Array(ab);
+
+        // VP8 uncompressed frame tag: bit0 = 0 (keyframe) / 1 (interframe)
+        const isInter = (data[0] & 0x01) === 1;
+        const type = isInter ? "delta" : "key";
+
+        // Timestamp: monotone local (microseconds-like)
+        const ts = frameCountRef.current + 1;
 
         try {
-            // NOTE: MediaRecorder segments are WebM. 
-            // VideoDecoder needs EncodedVideoChunk (raw bitstream).
-            // This direct approach assumes chunks are either raw or the decoder 
-            // can handle some container overhead (VP8 in WebM clusters).
-            
-            const isFirst = frameCountRef.current === 0;
-            const chunk = new EncodedVideoChunk({
-                type: isFirst ? 'key' : 'delta',
-                timestamp: performance.now() * 1000,
-                data: ab
-            });
-            
-            decoder.decode(chunk);
+            decoder.decode({
+                type,
+                timestamp: ts,
+                data,
+            }).catch(() => {});
         } catch (e) {
             console.warn("[decoder] decode error", e.message);
             if (e.message.includes("key frame")) {

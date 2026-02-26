@@ -75,15 +75,21 @@ function startAgent() {
         });
 
         await capture.start({
-            onChunk: async (blob) => {
+            onChunk: async (chunk) => {
                 if (!rtcOpen || !rtc) return;
                 try {
+                    const data = chunk?.data;
+                    if (!(data instanceof Uint8Array)) return;
+
+                    const ab = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+
                     try {
                         sentChunks += 1;
-                        sentBytes += blob?.size || 0;
+                        sentBytes += ab.byteLength;
                     } catch {}
-                    console.log("[rtc] send binary", { size: blob?.size || 0, chunks: sentChunks, bytes: sentBytes });
-                    await rtc.sendBinary(blob);
+
+                    console.log("[rtc] send binary", { size: ab.byteLength, chunks: sentChunks, bytes: sentBytes });
+                    await rtc.sendBinary(ab);
                 } catch {}
             },
         });

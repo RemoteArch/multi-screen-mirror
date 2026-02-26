@@ -1,4 +1,4 @@
-const { HubWsClient, WrtcBinaryChannel } = await import("./utils.js");
+const { HubWsClient, WrtcBinaryChannel, Vp8Decoder } = await import("./utils.js");
 
 let canvas = null;
 let ws = null;
@@ -15,6 +15,8 @@ let mediaSource = null;
 let sourceBuffer = null;
 let appendQueue = [];
 let drawRaf = null;
+
+let vp8Decoder = null;
 
 function ensureCanvas() {
   if (canvas) return;
@@ -166,6 +168,63 @@ function startDrawingToCanvas() {
   drawRaf = requestAnimationFrame(tick);
 }
 
+function ensureVp8Decoder() {
+  if (vp8Decoder) return;
+  ensureCanvas();
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  vp8Decoder = new Vp8Decoder({
+    onFrame: (bitmap) => {
+      try {
+        ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      } catch {}
+      try {
+        bitmap.close();
+      } catch {}
+    },
+    onStatus: (s, d) => console.log("[vp8dec]", s, d || ""),
+    onError: (e) => console.warn("[vp8dec] error", e),
+  });
+
+  vp8Decoder.start().catch((e) => console.warn("[vp8dec] start failed", e));
+}
+
+function tryDecodeVp8Packet(buf) {
+  // Format attendu (simple):
+  // [0] = 0x4b ('K') keyframe | 0x44 ('D') delta
+  // [1..8] = timestamp uint64be (optionnel, 0 si inconnu)
+  // [9..] = VP8 bitstream
+  //
+  // Si ce format ne matche pas, on renvoie false et on laisse l'ancien pipeline.
+  if (!buf || buf.byteLength < 10) return false;
+  const u8 = new Uint8Array(buf);
+  const t = u8[0];
+  if (t !== 0x4b && t !== 0x44) return false;
+
+  ensureVp8Decoder();
+  if (!vp8Decoder) return false;
+
+  let ts = 0;
+  try {
+    const dv = new DataView(buf);
+    ts = Number(dv.getBigUint64(1, false));
+  } catch {
+    ts = 0;
+  }
+
+  const data = new Uint8Array(buf, 9);
+  vp8Decoder
+    .decode({
+      type: t === 0x4b ? "key" : "delta",
+      timestamp: ts,
+      data,
+    })
+    .catch(() => {});
+
+  return true;
+}
+
 function start() {
   const onResize = () => resizeCanvasToDisplaySize();
   window.addEventListener("resize", onResize);
@@ -217,6 +276,12 @@ function start() {
             recvBytes += buf?.byteLength || 0;
           } catch {}
           console.log("[rtc] binary", { size: buf?.byteLength || 0, chunks: recvChunks, bytes: recvBytes });
+
+          // Nouveau chemin: si le chunk correspond à une frame VP8 "raw",
+          // on décode et on dessine directement sur le canvas.
+          if (tryDecodeVp8Packet(buf)) return;
+
+          // Fallback: ancien pipeline WebM via MediaSource.
           ensureMediaPipeline();
           enqueueChunk(buf);
           startDrawingToCanvas();
@@ -258,6 +323,8 @@ function start() {
     mediaSource = null;
     sourceBuffer = null;
     appendQueue = [];
+    try { vp8Decoder?.close(); } catch {}
+    vp8Decoder = null;
     try { ws?.close(); } catch {}
     ws = null;
   });
