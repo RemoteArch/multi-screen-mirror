@@ -53,7 +53,6 @@ export default function Emdeb() {
             console.log("[embed] resize", { nextW, nextH, dpr });
             canvas.width = nextW;
             canvas.height = nextH;
-            drawPlaceholder();
         }
     };
 
