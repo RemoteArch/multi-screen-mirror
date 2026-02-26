@@ -8,6 +8,16 @@ function startAgent() {
     let rtcOpen = false;
     let lastAdminId = null;
 
+    let lastCmd = null;
+
+    const execLogs = [];
+    const pushLog = (level, message, detail) => {
+        try {
+            execLogs.push({ ts: Date.now(), level: String(level || "info"), message: String(message || ""), detail: detail ?? null });
+            if (execLogs.length > 200) execLogs.splice(0, execLogs.length - 200);
+        } catch {}
+    };
+
     let sentChunks = 0;
     let sentBytes = 0;
 
@@ -16,6 +26,8 @@ function startAgent() {
             role: "agent",
             ts: Date.now(),
             userAgent: navigator.userAgent,
+            lastCmd,
+            logs: execLogs,
             capture: {
                 recording: !!capture?.isRecording?.() || false,
             },
@@ -55,7 +67,7 @@ function startAgent() {
         try {
             if (to == null) return;
             const e = error ? describeError(error) : null;
-            ws.sendJsonTo(to, "cmd_result", {
+            const payload = {
                 type: reqType,
                 ok: !!ok,
                 error: e ? e.message : "",
@@ -63,7 +75,14 @@ function startAgent() {
                 errorStack: e ? e.stack : "",
                 ts: Date.now(),
                 ...extra,
-            });
+            };
+
+            lastCmd = payload;
+
+            // On renvoie le résultat via infos (et pas via un message dédié)
+            try {
+                ws.sendJsonTo(to, "infos", agentInfos());
+            } catch {}
         } catch {}
     };
 
@@ -73,6 +92,7 @@ function startAgent() {
 
     const stopRtc = () => {
         console.log("[rtc] stop");
+        pushLog("info", "rtc_stop");
         try { rtc?.close?.(); } catch {}
         rtc = null;
         rtcTargetId = null;
@@ -81,6 +101,7 @@ function startAgent() {
 
     const stopCapture = async () => {
         console.log("[capture] stop");
+        pushLog("info", "capture_stop");
         try {
             if (capture) {
                 await capture.stop();
@@ -92,10 +113,17 @@ function startAgent() {
     const startCapture = async () => {
         if (capture?.isRecording?.()) return;
         console.log("[capture] start");
+        pushLog("info", "capture_start");
 
         capture = new Vp8Capture({
-            onStatus: (s) => console.log("[capture] status", s),
-            onError: (e) => console.error("[capture] error", e),
+            onStatus: (s) => {
+                console.log("[capture] status", s);
+                pushLog("info", "capture_status", s);
+            },
+            onError: (e) => {
+                console.error("[capture] error", e);
+                pushLog("error", "capture_error", { name: e?.name || "Error", message: e?.message || String(e) });
+            },
         });
 
         await capture.start({
@@ -123,6 +151,7 @@ function startAgent() {
         if (targetId == null) return;
         if (rtcTargetId === targetId && rtcOpen) return;
         console.log("[rtc] connecting to embed", targetId);
+        pushLog("info", "rtc_connect", { targetId });
 
         stopRtc();
         rtcTargetId = targetId;
@@ -150,8 +179,10 @@ function startAgent() {
             await channel.start(true);
             setRtcOpen(true);
             console.log("[rtc] open to", targetId);
+            pushLog("info", "rtc_open", { targetId });
         } catch (e) {
             console.warn("[rtc] start failed to", targetId, e);
+            pushLog("error", "rtc_start_failed", { targetId, name: e?.name || "Error", message: e?.message || String(e) });
             stopRtc();
         }
     };
@@ -168,17 +199,20 @@ function startAgent() {
 
         if (msg?.action === "cmd") {
             lastAdminId = msg.from;
+            pushLog("info", "cmd_recv", msg?.data);
 
             const type = msg?.data?.type;
             if (type === "start_capture") {
                 startCapture()
                     .then(() => {
                         console.log("[cmd] start_capture ok");
+                        pushLog("info", "cmd_start_capture_ok");
                         replyCmd({ to: msg.from, reqType: type, ok: true });
                     })
                     .catch((e) => {
                         const d = describeError(e);
                         console.error("[cmd] start_capture failed", d.name, d.message, d.stack);
+                        pushLog("error", "cmd_start_capture_failed", d);
                         replyCmd({ to: msg.from, reqType: type, ok: false, error: e });
                     });
                 return;
@@ -187,11 +221,13 @@ function startAgent() {
                 stopCapture()
                     .then(() => {
                         console.log("[cmd] stop_capture ok");
+                        pushLog("info", "cmd_stop_capture_ok");
                         replyCmd({ to: msg.from, reqType: type, ok: true });
                     })
                     .catch((e) => {
                         const d = describeError(e);
                         console.error("[cmd] stop_capture failed", d.name, d.message, d.stack);
+                        pushLog("error", "cmd_stop_capture_failed", d);
                         replyCmd({ to: msg.from, reqType: type, ok: false, error: e });
                     });
                 return;
@@ -200,11 +236,13 @@ function startAgent() {
                 connectToEmbed(msg?.data?.targetId)
                     .then(() => {
                         console.log("[cmd] connect_embed ok", msg?.data?.targetId);
+                        pushLog("info", "cmd_connect_embed_ok", { targetId: msg?.data?.targetId });
                         replyCmd({ to: msg.from, reqType: type, ok: true, extra: { targetId: msg?.data?.targetId } });
                     })
                     .catch((e) => {
                         const d = describeError(e);
                         console.error("[cmd] connect_embed failed", d.name, d.message, d.stack);
+                        pushLog("error", "cmd_connect_embed_failed", d);
                         replyCmd({ to: msg.from, reqType: type, ok: false, error: e, extra: { targetId: msg?.data?.targetId } });
                     });
                 return;

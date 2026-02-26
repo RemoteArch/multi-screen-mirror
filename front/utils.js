@@ -50,7 +50,7 @@ export class Vp8Capture {
       if (!videoTrack) throw new Error("Pas de piste vidéo.");
 
       videoTrack.addEventListener("ended", () => {
-        if (this._running) this.stop().catch(() => {});
+        if (this._running) this.stop();
       });
 
       const settings = videoTrack.getSettings?.() || {};
@@ -102,10 +102,7 @@ export class Vp8Capture {
       this.onStatus("encoding");
 
       // 3) Loop: read VideoFrame -> encode -> close frame
-      this._encodeLoop().catch((err) => {
-        this.onError(err);
-        this.stop().catch(() => {});
-      });
+      this._encodeLoop();
     } catch (err) {
       this.onError(err);
       await this._cleanup().catch(() => {});
@@ -132,7 +129,7 @@ export class Vp8Capture {
 
       // Backpressure: évite d’accumuler trop de frames encodées en attente
       if (this.encoder.encodeQueueSize > 8) {
-        await this.encoder.flush().catch(() => {});
+        await this.encoder.flush();
       }
     }
   }
@@ -921,4 +918,241 @@ export class WebTransportHubClient {
   }
 }
 
+import { toCanvas } from "https://cdn.jsdelivr.net/npm/html-to-image/+esm";
+
+export class HtmlVp8Capture {
+  
+  constructor({
+    videoBitsPerSecond = 1_200_000,
+    frameRate = 10,               // DOM->raster coûte cher: 5-15 fps est plus réaliste que 30 sur mobile
+    keyFrameIntervalMs = 2000,     // keyframe toutes les N ms
+    pixelRatio = 1,               // IMPORTANT mobile: 1 (ou <1) pour éviter crash/mémoire
+    width = null,                 // si null -> taille de l'élément capturé
+    height = null,
+    backgroundColor = null,       // ex: "#fff" si besoin
+    latencyMode = "realtime",     // "realtime" recommandé
+    onStatus = () => {},
+    onError = () => {},
+  } = {}) {
+    this.videoBitsPerSecond = videoBitsPerSecond;
+    this.frameRate = frameRate;
+    this.keyFrameIntervalMs = keyFrameIntervalMs;
+    this.pixelRatio = pixelRatio;
+    this.width = width;
+    this.height = height;
+    this.backgroundColor = backgroundColor;
+    this.latencyMode = latencyMode;
+    this.onStatus = onStatus;
+    this.onError = onError;
+
+    this.encoder = null;
+    this._running = false;
+    this._onChunk = null;
+
+    this._element = null;
+    this._canvas = null;
+    this._ctx = null;
+
+    this._lastKeyMs = 0;
+    this._t0ms = 0;
+    this._timer = null;
+    this._frameIndex = 0;
+  }
+
+  async start({ element, onChunk } = {}) {
+    try {
+      if (!element) throw new Error("start({ element }) requis.");
+      this._element = element;
+
+      this._onChunk = typeof onChunk === "function" ? onChunk : null;
+      this._running = true;
+
+      if (!window.VideoEncoder) {
+        throw new Error("WebCodecs VideoEncoder n'est pas supporté.");
+      }
+      if (!VideoEncoder.isConfigSupported) {
+        throw new Error("VideoEncoder.isConfigSupported n'est pas supporté.");
+      }
+
+      this.onStatus("starting");
+
+      // Canvas de sortie (celui qui sert de source à VideoFrame)
+      this._canvas = document.createElement("canvas");
+      this._ctx = this._canvas.getContext("2d", { alpha: true });
+
+      // Détermine une taille de capture (évite les très grands canvases)
+      const rect = element.getBoundingClientRect();
+      const outW = this.width ?? Math.max(2, Math.round(rect.width));
+      const outH = this.height ?? Math.max(2, Math.round(rect.height));
+
+      this._canvas.width = outW;
+      this._canvas.height = outH;
+
+      // Configure encoder VP8
+      const config = {
+        codec: "vp8",
+        width: outW,
+        height: outH,
+        bitrate: this.videoBitsPerSecond,
+        framerate: this.frameRate,
+        latencyMode: this.latencyMode,
+      };
+
+      const support = await VideoEncoder.isConfigSupported(config);
+      if (!support?.supported) {
+        throw new Error(`Config VP8 non supportée: ${JSON.stringify(support)}`);
+      }
+
+      this.onStatus("starting_encoder", {
+        codec: "vp8",
+        width: outW,
+        height: outH,
+        bitrate: this.videoBitsPerSecond,
+        framerate: this.frameRate,
+      });
+
+      this.encoder = new VideoEncoder({
+        output: (chunk /* EncodedVideoChunk */, metadata) => {
+          try {
+            if (!this._onChunk) return;
+
+            const data = new Uint8Array(chunk.byteLength);
+            chunk.copyTo(data);
+
+            // Même style de payload que ton exemple:
+            // { type, timestamp, data } + meta
+            this._onChunk(
+              { type: chunk.type, timestamp: chunk.timestamp, data },
+              {
+                codec: "vp8",
+                bytes: data.byteLength,
+                width: outW,
+                height: outH,
+                key: chunk.type === "key",
+                frameIndex: this._frameIndex,
+                // metadata peut contenir des infos utiles selon implémentation
+                metadata,
+              }
+            );
+          } catch (err) {
+            this.onError(err);
+          }
+        },
+        error: (e) => this.onError(e instanceof Error ? e : new Error(String(e))),
+      });
+
+      this.encoder.configure(config);
+
+      this._lastKeyMs = 0;
+      this._t0ms = performance.now();
+      this._frameIndex = 0;
+
+      this.onStatus("capturing");
+
+      // Boucle cadence fixe
+      const intervalMs = Math.max(1, Math.round(1000 / this.frameRate));
+      this._timer = setInterval(() => {
+        // fire & forget; on gère la pression via encodeQueueSize/flush
+        this._tick().catch((err) => this.onError(err));
+      }, intervalMs);
+
+      // Tick immédiat
+      await this._tick();
+    } catch (err) {
+      this.onError(err);
+      await this._cleanup().catch(() => {});
+      throw err;
+    }
+  }
+
+  async _tick() {
+    if (!this._running || !this.encoder || !this._element) return;
+
+    // Backpressure: si la queue explose, on drop un frame (latence live)
+    if (this.encoder.encodeQueueSize > 10) {
+      this.onStatus("dropping_frame", { encodeQueueSize: this.encoder.encodeQueueSize });
+      return;
+    }
+
+    // 1) DOM -> canvas (raster)
+    // toCanvas renvoie un canvas "domCanvas" que l'on draw dans notre canvas cible à taille fixe
+    const domCanvas = await toCanvas(this._element, {
+      pixelRatio: this.pixelRatio,
+      cacheBust: true,
+      backgroundColor: this.backgroundColor ?? undefined,
+      // Astuce: si tu as du contenu hors-bord, html-to-image gère déjà via l'élément
+    });
+
+    // 2) draw dans canvas sortie (mise à l’échelle si nécessaire)
+    this._ctx.clearRect(0, 0, this._canvas.width, this._canvas.height);
+    this._ctx.drawImage(domCanvas, 0, 0, this._canvas.width, this._canvas.height);
+
+    // 3) canvas -> VideoFrame -> encode
+    const nowMs = performance.now();
+    const tsUs = Math.round((nowMs - this._t0ms) * 1000); // microsecondes
+
+    const forceKey =
+      this._lastKeyMs === 0 || nowMs - this._lastKeyMs >= this.keyFrameIntervalMs;
+
+    const frame = new VideoFrame(this._canvas, { timestamp: tsUs });
+
+    try {
+      this.encoder.encode(frame, { keyFrame: forceKey });
+      if (forceKey) this._lastKeyMs = nowMs;
+      this._frameIndex++;
+    } finally {
+      frame.close();
+    }
+
+    // Flush occasionnel pour garder latence basse
+    if (this.encoder.encodeQueueSize > 6) {
+      await this.encoder.flush();
+    }
+  }
+
+  async stop() {
+    this._running = false;
+    this.onStatus("stopping");
+
+    try {
+      if (this._timer) {
+        clearInterval(this._timer);
+        this._timer = null;
+      }
+
+      try {
+        await this.encoder?.flush();
+      } catch {}
+
+      try {
+        this.encoder?.close();
+      } catch {}
+    } finally {
+      await this._cleanup();
+      this.onStatus("stopped");
+    }
+  }
+
+  isRecording() {
+    return this._running;
+  }
+
+  // Optionnel: pour afficher ce que tu captures (preview)
+  getPreviewCanvas() {
+    return this._canvas;
+  }
+
+  async _cleanup() {
+    this.encoder = null;
+    this._onChunk = null;
+    this._element = null;
+
+    this._ctx = null;
+    this._canvas = null;
+
+    this._lastKeyMs = 0;
+    this._t0ms = 0;
+    this._frameIndex = 0;
+  }
+}
 

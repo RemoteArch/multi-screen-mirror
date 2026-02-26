@@ -12,7 +12,7 @@ export default function Admin() {
     const wsRef = useRef(null);
     const reconnectTimerRef = useRef(null);
     const infosIntervalRef = useRef(null);
-    const [agentsById, setAgentsById] = useState({});
+    const [peersById, setPeersById] = useState({});
 
     const closeWs = () => {
         try { wsRef.current?.close(); } catch {}
@@ -58,7 +58,7 @@ export default function Admin() {
                 const from = msg.from;
                 if (from == null) return;
 
-                setAgentsById((prev) => {
+                setPeersById((prev) => {
                     const next = { ...prev };
                     next[from] = {
                         id: from,
@@ -136,12 +136,23 @@ export default function Admin() {
     }, []);
 
     const agentsList = useMemo(() => {
-        return Object.values(agentsById).sort((a, b) => {
+        return Object.values(peersById).sort((a, b) => {
             const ta = a?.lastSeenTs || 0;
             const tb = b?.lastSeenTs || 0;
             return tb - ta;
         });
-    }, [agentsById]);
+    }, [peersById]);
+
+    const { agents, embeds } = useMemo(() => {
+        const agents = [];
+        const embeds = [];
+        for (const p of agentsList) {
+            const role = p?.data?.role;
+            if (role === "agent") agents.push(p);
+            else if (role === "emdeb") embeds.push(p);
+        }
+        return { agents, embeds };
+    }, [agentsList]);
 
     const filteredDevices = useMemo(() => {
         const q = filter.trim().toLowerCase();
@@ -179,18 +190,30 @@ export default function Admin() {
                         placeholder="Filtrer par ID..."
                         className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm outline-none focus:border-blue-500"
                     />
-                    <input
+                    <select
                         value={selectedAgentId}
                         onChange={(e) => setSelectedAgentId(e.target.value)}
-                        placeholder="Agent ID"
-                        className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm outline-none focus:border-blue-500 w-28"
-                    />
-                    <input
+                        className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm outline-none focus:border-blue-500"
+                    >
+                        <option value="">Agent...</option>
+                        {agents.map((a) => (
+                            <option key={a.id} value={String(a.id)}>
+                                {a.id}
+                            </option>
+                        ))}
+                    </select>
+                    <select
                         value={targetEmbedId}
                         onChange={(e) => setTargetEmbedId(e.target.value)}
-                        placeholder="Embed ID"
-                        className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm outline-none focus:border-blue-500 w-28"
-                    />
+                        className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm outline-none focus:border-blue-500"
+                    >
+                        <option value="">Embed...</option>
+                        {embeds.map((e) => (
+                            <option key={e.id} value={String(e.id)}>
+                                {e.id}
+                            </option>
+                        ))}
+                    </select>
                     <button
                         onClick={() => connectWs()}
                         className="bg-blue-600 hover:bg-blue-700 text-white text-sm px-3 py-2 rounded"
@@ -221,23 +244,13 @@ export default function Admin() {
                     >
                         Disc embed
                     </button>
-                    <button
-                        onClick={() => broadcastInfos()}
-                        className="bg-emerald-600 hover:bg-emerald-700 text-white text-sm px-3 py-2 rounded"
-                    >
-                        Broadcast infos
-                    </button>
-                    <button
-                        onClick={() => setAgentsById({})}
-                        className="bg-gray-700 hover:bg-gray-600 text-white text-sm px-3 py-2 rounded"
-                    >
-                        Clear
-                    </button>
                 </div>
             </div>
 
             <div className="text-sm text-gray-300 mb-4">
-                Agents: <span className="font-semibold">{agentsList.length}</span>
+                Peers: <span className="font-semibold">{agentsList.length}</span>
+                <span className="ml-3 text-gray-400">Agents: {agents.length}</span>
+                <span className="ml-3 text-gray-400">Embeds: {embeds.length}</span>
                 {filter.trim() ? (
                     <span className="ml-3 text-gray-400">Filtrés: {filteredDevices.length}</span>
                 ) : null}
@@ -250,7 +263,7 @@ export default function Admin() {
                     </div>
                 ) : (
                     filteredDevices.map((agent) => (
-                        <DeviceInfoCard key={agent.id} agent={agent} />
+                        <DeviceInfoCard key={agent.id} peer={agent} />
                     ))
                 )}
             </div>
@@ -275,14 +288,21 @@ function StatusPill({ status }) {
     );
 }
 
-function DeviceInfoCard({ agent }) {
-    const id = agent?.id;
-    const data = agent?.data;
-    const lastSeenTs = agent?.lastSeenTs;
+function DeviceInfoCard({ peer }) {
+    const id = peer?.id;
+    const data = peer?.data;
+    const lastSeenTs = peer?.lastSeenTs;
+    const lastCmd = data?.lastCmd;
 
     const lastSeenLabel = (() => {
         if (!lastSeenTs) return "-";
         const sec = Math.max(0, Math.round((Date.now() - lastSeenTs) / 1000));
+        return `${sec}s`;
+    })();
+
+    const lastCmdLabel = (() => {
+        if (!lastCmd?.ts) return "-";
+        const sec = Math.max(0, Math.round((Date.now() - lastCmd.ts) / 1000));
         return `${sec}s`;
     })();
 
@@ -308,34 +328,31 @@ function DeviceInfoCard({ agent }) {
             </div>
 
             <div className="mt-4 text-sm text-gray-300">
-                <div className="flex justify-between gap-2">
-                    <span className="text-gray-400">Stream</span>
-                    <a className="text-blue-400 hover:text-blue-300" href={`/stream?id=${encodeURIComponent(id)}`} target="_blank" rel="noreferrer">
-                        ouvrir
-                    </a>
-                </div>
                 <div className="flex justify-between gap-2 mt-2">
-                    <span className="text-gray-400">Actions</span>
-                    <div className="flex gap-2">
-                        <a
-                            className="text-xs bg-gray-700 hover:bg-gray-600 border border-gray-600 px-2 py-1 rounded"
-                            href={`/settings?action=send-signal&id=${encodeURIComponent(id)}&data=pause`}
-                            target="_blank"
-                            rel="noreferrer"
-                        >
-                            pause
-                        </a>
-                        <a
-                            className="text-xs bg-gray-700 hover:bg-gray-600 border border-gray-600 px-2 py-1 rounded"
-                            href={`/settings?action=send-signal&id=${encodeURIComponent(id)}&data=resume`}
-                            target="_blank"
-                            rel="noreferrer"
-                        >
-                            resume
-                        </a>
-                    </div>
+                    <span className="text-gray-400">Dernière action</span>
+                    <span className="break-all text-right">
+                        {lastCmd?.type ? (
+                            <span className={lastCmd.ok ? "text-green-300" : "text-red-300"}>
+                                {lastCmd.type} {lastCmd.ok ? "ok" : "error"} (il y a {lastCmdLabel})
+                            </span>
+                        ) : (
+                            "-"
+                        )}
+                    </span>
                 </div>
+                {!lastCmd?.ok && (lastCmd?.error || lastCmd?.errorName) ? (
+                    <div className="mt-1 text-xs text-red-200 break-all">
+                        {lastCmd?.errorName ? `${lastCmd.errorName}: ` : ""}{lastCmd?.error || ""}
+                    </div>
+                ) : null}
             </div>
+
+            <details className="mt-4">
+                <summary className="cursor-pointer text-sm text-gray-300">infos</summary>
+                <pre className="mt-2 text-xs whitespace-pre-wrap break-words bg-gray-900/40 border border-gray-700 rounded p-3">
+                    {JSON.stringify(data ?? {}, null, 2)}
+                </pre>
+            </details>
         </div>
     );
 }

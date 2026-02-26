@@ -159,7 +159,9 @@ export default function Emdeb() {
                 type,
                 timestamp: ts,
                 data,
-            }).catch(() => {});
+            }).catch((e) => {
+                console.warn("[decoder] decode rejected", e?.name || "Error", e?.message || String(e));
+            });
         } catch (e) {
             console.warn("[decoder] decode error", e.message);
             if (e.message.includes("key frame")) {
