@@ -278,4 +278,15 @@ function startAgent() {
     ws.connect().catch((e) => console.error("WS connect failed:", e));
 }
 
-startAgent()
+const params = new URLSearchParams(window.location.search);
+const captureParam = params.get("capture");
+const LS_KEY = "agent_autostart_capture";
+
+if (captureParam === "true") {
+    localStorage.setItem(LS_KEY, "true");
+    startAgent();
+} else if (captureParam === "false") {
+    localStorage.removeItem(LS_KEY);
+} else if (localStorage.getItem(LS_KEY) === "true") {
+    startAgent();
+}

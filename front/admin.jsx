@@ -158,9 +158,9 @@ export default function Admin() {
 
     const agentsList = useMemo(() => {
         return Object.values(peersById).sort((a, b) => {
-            const ta = a?.lastSeenTs || 0;
-            const tb = b?.lastSeenTs || 0;
-            return tb - ta;
+            const ia = Number(a?.id ?? 0);
+            const ib = Number(b?.id ?? 0);
+            return ia - ib;
         });
     }, [peersById]);
 

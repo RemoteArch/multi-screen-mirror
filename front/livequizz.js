@@ -1,4 +1,11 @@
-const { HubWsClient } = await import("./utils.js");
+let HubWsClient;
+if (typeof loadModule === 'function') {
+    const { HubWsClient: HubWsClientModule } = await loadModule("./utils.js");
+    HubWsClient = HubWsClientModule;
+} else {
+    const { HubWsClient: HubWsClientImport } = await import("./utils.js");
+    HubWsClient = HubWsClientImport;
+}
 
 const ROOM = "quizz";
 const URL = "wss://wshnklvucl.zen-apps.com/ws";
