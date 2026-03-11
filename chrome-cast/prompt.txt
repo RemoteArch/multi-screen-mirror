@@ -1,0 +1,83 @@
+Crée-moi un mini projet web complet Google Cast avec 2 pages :
+
+1) une page SENDER
+2) une page RECEIVER
+
+Objectif :
+- La page sender permet à l’utilisateur de saisir une URL vidéo
+- Puis de se connecter à un appareil Chromecast
+- Puis d’envoyer cette vidéo au receiver Cast
+- La page receiver reçoit le stream vidéo envoyé
+- Et l’affiche automatiquement dans un lecteur vidéo sur le téléviseur
+
+Contraintes techniques :
+- Utiliser HTML, CSS, JavaScript uniquement
+- Pas de framework
+- Code clair, propre et bien commenté
+- Fichiers séparés :
+  - sender.html
+  - sender.js
+  - receiver.html
+  - receiver.js
+  - style.css
+- Prévoir aussi un petit README expliquant comment tester
+
+Fonctionnalités attendues pour la page sender :
+- Champ input pour URL vidéo
+- Bouton Cast
+- Bouton “Envoyer la vidéo”
+- Affichage du statut de connexion
+- Gestion des erreurs
+- Utilisation du Google Cast Web Sender SDK
+- Initialisation correcte du CastContext
+- Utilisation d’un receiverApplicationId configurable en haut du fichier
+- Envoi de la vidéo avec MediaInfo
+- Support des types mp4 et m3u8 si possible
+- Envoi d’un titre simple “Ma vidéo”
+- Vérifier qu’une session Cast existe avant l’envoi
+
+Fonctionnalités attendues pour la page receiver :
+- Utiliser le CAF Web Receiver SDK
+- Initialiser correctement CastReceiverContext
+- Lire les requêtes LOAD
+- Récupérer l’URL vidéo envoyée
+- Afficher automatiquement la vidéo
+- Utiliser le player Cast standard ou un élément vidéo si nécessaire
+- Logger les événements importants dans la console
+- Gérer le cas où aucune URL n’est reçue
+
+Contraintes d’interface :
+- Interface simple, sombre, moderne
+- Un champ URL bien visible
+- Une zone d’état :
+  - “non connecté”
+  - “connexion en cours”
+  - “connecté”
+  - “vidéo envoyée”
+  - “erreur”
+- Design responsive basique
+
+Important :
+- Le receiver doit être un vrai Web Receiver Google Cast
+- Le sender doit être une page web qui peut lancer une session Cast
+- Ajouter dans le code les endroits où je dois remplacer :
+  - APP_ID_RECEIVER
+  - URL du receiver
+- Ajouter des commentaires “À CONFIGURER ICI”
+
+Je veux comme sortie :
+1. le contenu complet de sender.html
+2. le contenu complet de sender.js
+3. le contenu complet de receiver.html
+4. le contenu complet de receiver.js
+5. le contenu complet de style.css
+6. un README de test étape par étape
+
+Ajoute aussi dans le README :
+- comment héberger localement les fichiers
+- comment enregistrer un Custom Web Receiver
+- comment remplacer l’APP_ID
+- comment tester avec une URL mp4
+- les erreurs fréquentes et leurs solutions
+
+Le code doit être directement copiable et exécutable après configuration.

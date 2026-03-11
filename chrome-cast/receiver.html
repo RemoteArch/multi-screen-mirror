@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Google Cast Receiver</title>
+    <link rel="stylesheet" href="style.css">
+    
+    <!-- Google Cast CAF Web Receiver SDK -->
+    <script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+</head>
+<body class="receiver-body">
+    <div class="receiver-container">
+        <!-- Zone vidéo principale -->
+        <div id="videoContainer" class="video-container">
+            <video id="videoElement" class="video-player"></video>
+        </div>
+
+        <!-- Overlay d'information -->
+        <div id="infoOverlay" class="info-overlay">
+            <div class="receiver-logo">📺</div>
+            <h1>Google Cast Receiver</h1>
+            <p id="receiverStatus">En attente de contenu...</p>
+        </div>
+
+        <!-- Zone de debug (visible uniquement en développement) -->
+        <div id="debugPanel" class="debug-panel">
+            <h3>Debug Info</h3>
+            <div id="debugLog"></div>
+        </div>
+    </div>
+
+    <script src="receiver.js"></script>
+</body>
+</html>

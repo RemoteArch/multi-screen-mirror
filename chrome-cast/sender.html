@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Google Cast Sender</title>
+    <link rel="stylesheet" href="style.css">
+    
+    <!-- Google Cast Web Sender SDK -->
+    <script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>🎬 Google Cast Sender</h1>
+        
+        <!-- Zone de saisie URL -->
+        <div class="input-section">
+            <label for="videoUrl">URL de la vidéo</label>
+            <input 
+                type="text" 
+                id="videoUrl" 
+                placeholder="https://example.com/video.mp4"
+                value="https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
+            >
+            <small>Formats supportés : MP4, M3U8 (HLS)</small>
+        </div>
+
+        <!-- Zone de statut -->
+        <div class="status-section">
+            <div class="status-label">Statut :</div>
+            <div id="status" class="status status-disconnected">Non connecté</div>
+        </div>
+
+        <!-- Boutons d'action -->
+        <div class="actions">
+            <!-- Le bouton Cast sera injecté ici par le SDK -->
+            <div id="castButtonContainer">
+                <google-cast-launcher id="castButton"></google-cast-launcher>
+            </div>
+            
+            <button id="sendVideoBtn" class="btn btn-primary" disabled>
+                📤 Envoyer la vidéo
+            </button>
+        </div>
+
+        <!-- Zone d'erreur -->
+        <div id="errorSection" class="error-section" style="display: none;">
+            <strong>⚠️ Erreur :</strong>
+            <p id="errorMessage"></p>
+        </div>
+
+        <!-- Informations de debug -->
+        <div class="debug-section">
+            <h3>Informations</h3>
+            <div id="debugInfo">
+                <p>En attente de connexion...</p>
+            </div>
+        </div>
+    </div>
+
+    <script src="sender.js"></script>
+</body>
+</html>
